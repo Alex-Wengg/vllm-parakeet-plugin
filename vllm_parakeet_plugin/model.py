@@ -34,6 +34,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.collection_utils import is_list_of
 
+from .encoder_graphs import EncoderGraphs
 from .processing import (
     ParakeetTDTDummyInputsBuilder,
     ParakeetTDTMultiModalProcessor,
@@ -41,7 +42,7 @@ from .processing import (
     get_max_audio_clip_s,
     subsampled_length,
 )
-from .tdt import TDTSlots, decode_next_tokens
+from .tdt import TDTDecodeConfig, TDTGraphs, TDTSlots, decode_next_tokens
 
 if TYPE_CHECKING:
     from .model_state import ParakeetTDTModelState
@@ -152,6 +153,10 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         self.register_buffer(
             "durations", torch.tensor(config.durations), persistent=False
         )
+        # Set by `ParakeetForTDTConfig` unless eager mode was asked for.
+        self.use_cuda_graphs = getattr(config, "parakeet_cuda_graphs", False)
+        self.encoder_graphs: EncoderGraphs | None = None
+        self.tdt_graphs: TDTGraphs | None = None
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         input_features = kwargs.pop("input_features", None)
@@ -169,10 +174,29 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
                 f"Incorrect type of audio features: {type(input_features)}"
             )
 
+        feature_lengths = feature_lengths.reshape(-1).to(self.durations.device)
+        frames = None
+        if self.use_cuda_graphs:
+            if self.encoder_graphs is None:
+                self.encoder_graphs = EncoderGraphs(
+                    self.encoder,
+                    self.encoder_projector,
+                    num_mel_bins=self.config.encoder_config.num_mel_bins,
+                    dtype=self.dtype,
+                    device=self.durations.device,
+                )
+            frames = self.encoder_graphs.run(features, feature_lengths)
+        if frames is None:
+            frames = self._encode(features, feature_lengths)
+        num_frames = self.encoder._get_subsampling_output_length(feature_lengths)
+        return [f[:n] for f, n in zip(frames, num_frames.tolist())]
+
+    def _encode(
+        self, features: list[torch.Tensor], feature_lengths: torch.Tensor
+    ) -> torch.Tensor:
         padded = nn.utils.rnn.pad_sequence(
             [f.to(self.dtype) for f in features], batch_first=True, padding_value=0.0
         )
-        feature_lengths = feature_lengths.reshape(-1).to(padded.device)
         attention_mask = (
             torch.arange(padded.shape[1], device=padded.device)[None, :]
             < feature_lengths[:, None]
@@ -180,9 +204,7 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         hidden_states = self.encoder(
             input_features=padded, attention_mask=attention_mask
         ).last_hidden_state
-        frames = self.encoder_projector(hidden_states)
-        num_frames = self.encoder._get_subsampling_output_length(feature_lengths)
-        return [f[:n] for f, n in zip(frames, num_frames.tolist())]
+        return self.encoder_projector(hidden_states)
 
     def forward(
         self,
@@ -204,18 +226,24 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         )
         if tdt_state is not None and tdt_slots is not None and tdt_slots.numel():
             assert tdt_rows is not None
-            selected[tdt_rows, 0] = decode_next_tokens(
-                tdt_state,
-                tdt_slots,
-                self.decoder,
-                self.joint,
-                durations=self.durations,
-                blank_token_id=self.config.blank_token_id,
-                eos_token_id=self.eos_token_id,
-                vocab_size=self.config.vocab_size,
-                max_symbols_per_step=self.config.max_symbols_per_step,
-            )
+            selected[tdt_rows, 0] = self._decode(tdt_state, tdt_slots)
         return selected
+
+    def _decode(self, state: TDTSlots, slots: torch.Tensor) -> torch.Tensor:
+        config = TDTDecodeConfig(
+            durations=self.durations,
+            blank_token_id=self.config.blank_token_id,
+            eos_token_id=self.eos_token_id,
+            vocab_size=self.config.vocab_size,
+            max_symbols_per_step=self.config.max_symbols_per_step,
+        )
+        if not self.use_cuda_graphs:
+            return decode_next_tokens(
+                state, slots, self.decoder, self.joint, **vars(config)
+            )
+        if self.tdt_graphs is None or self.tdt_graphs.state is not state:
+            self.tdt_graphs = TDTGraphs(state, self.decoder, self.joint, config)
+        return self.tdt_graphs.decode(slots)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # The TDT loop already picked each token; make the sampler keep it.

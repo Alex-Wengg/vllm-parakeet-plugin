@@ -39,9 +39,15 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
             )
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
-            # The decode loop is data-dependent, so it cannot be graph-captured.
-            logger.info("Parakeet TDT runs eagerly; setting enforce_eager=True.")
+            # vLLM cannot graph-capture the data-dependent decode loop, so the
+            # model captures its own CUDA graphs for the encoder and for fixed
+            # runs of the loop. --enforce-eager turns those off too.
+            logger.info(
+                "Parakeet TDT captures its own CUDA graphs; "
+                "setting enforce_eager=True for vLLM."
+            )
             model_config.enforce_eager = True
+            model_config.hf_config.parakeet_cuda_graphs = True
         parallel_config = vllm_config.parallel_config
         if (
             parallel_config.tensor_parallel_size != 1

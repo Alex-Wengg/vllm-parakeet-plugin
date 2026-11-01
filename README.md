@@ -76,7 +76,11 @@ print(output[0].outputs[0].text)
   work unchanged. A slot that runs out of frames emits `<|endoftext|>`.
 - The loop follows Transformers' `ParakeetTDTGenerationMixin`, plus NeMo's
   `max_symbols_per_step` guard.
-- The decode loop is data-dependent, so the plugin runs with `enforce_eager`.
+- vLLM cannot graph-capture the data-dependent decode loop, so the plugin
+  runs vLLM with `enforce_eager` and captures its own CUDA graphs: the
+  encoder at padded batch shapes (a power-of-two number of clips, a multiple
+  of 512 mel frames), and the decode loop four iterations at a time.
+  `--enforce-eager` turns these off too.
 
 ## Tests
 

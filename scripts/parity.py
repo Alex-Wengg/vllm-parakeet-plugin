@@ -48,13 +48,18 @@ def reference_tokens(model_id: str, clips: list[np.ndarray]) -> list[list[int]]:
 
 
 def plugin_tokens(
-    model_id: str, clips: list[np.ndarray], dtype: str, max_num_seqs: int
+    model_id: str,
+    clips: list[np.ndarray],
+    dtype: str,
+    max_num_seqs: int,
+    enforce_eager: bool,
 ) -> list[list[int]]:
     llm = LLM(
         model=model_id,
         dtype=dtype,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=0.3,
+        enforce_eager=enforce_eager,
     )
     blank = llm.llm_engine.model_config.hf_config.blank_token_id
     eos = llm.llm_engine.model_config.hf_config.eos_token_id
@@ -77,11 +82,16 @@ def main() -> None:
     parser.add_argument("--dtype", default="float32")
     parser.add_argument("--num-clips", type=int, default=73)
     parser.add_argument("--max-num-seqs", type=int, default=32)
+    parser.add_argument(
+        "--enforce-eager", action="store_true", help="turn off CUDA graphs"
+    )
     args = parser.parse_args()
 
     clips = load_clips(args.num_clips)
     expected = reference_tokens(args.model, clips)
-    actual = plugin_tokens(args.model, clips, args.dtype, args.max_num_seqs)
+    actual = plugin_tokens(
+        args.model, clips, args.dtype, args.max_num_seqs, args.enforce_eager
+    )
 
     processor = AutoProcessor.from_pretrained(args.model)
     matches = 0
@@ -92,7 +102,8 @@ def main() -> None:
         print(f"clip {i} differs")
         print("  transformers:", processor.decode(exp))
         print("  vllm:        ", processor.decode(act))
-    print(f"{matches}/{len(clips)} transcripts token-identical ({args.dtype})")
+    mode = "eager" if args.enforce_eager else "CUDA graphs"
+    print(f"{matches}/{len(clips)} transcripts token-identical ({args.dtype}, {mode})")
 
 
 if __name__ == "__main__":
