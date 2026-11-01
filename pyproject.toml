@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-parakeet-plugin"
+version = "0.1.0"
+description = "NVIDIA Parakeet TDT transcription for vLLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Alex Weng", email = "hanweng9@gmail.com"}]
+dependencies = [
+    "vllm[audio]>=0.32.0",
+    "transformers>=5.16.1",
+    "librosa",
+    "torch",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "soundfile", "pyarrow", "huggingface-hub", "httpx", "jiwer"]
+
+[project.entry-points."vllm.general_plugins"]
+parakeet = "vllm_parakeet_plugin:register"
+
+[project.urls]
+Repository = "https://github.com/Alex-Wengg/vllm-parakeet-plugin"
+
+[tool.setuptools]
+packages = ["vllm_parakeet_plugin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs CUDA and vLLM"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
